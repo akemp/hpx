@@ -7,9 +7,11 @@
 #define HPX_COMPONENTS_IO_SERVER_ORANGEFS_FILE_HPP_SEP_01_2014_1223PM
 
 #include <hpx/hpx_fwd.hpp>
-#include <hpx/runtime/components/component_type.hpp>
-#include <hpx/runtime/components/server/managed_component_base.hpp>
+#include <hpx/include/thread_executors.hpp>
 #include <hpx/runtime/actions/component_action.hpp>
+#include <hpx/runtime/components/component_type.hpp>
+#include <hpx/runtime/components/server/locking_hook.hpp>
+#include <hpx/runtime/components/server/managed_component_base.hpp>
 #include <hpx/util/locality_result.hpp>
 
 /* ------------------------  added pvfs header stuff --------------- */
@@ -31,8 +33,8 @@ extern "C" {
 namespace hpx { namespace io { namespace server
 {
 
-    class orangefs_file :
-        public components::managed_component_base<orangefs_file>
+    class orangefs_file : public components::locking_hook<
+                          components::managed_component_base<orangefs_file> >
     {
       public:
         orangefs_file() : fd_(-1)
@@ -46,6 +48,19 @@ namespace hpx { namespace io { namespace server
         }
 
         void open(std::string const& name, int const flag)
+        {
+            // Get a reference to one of the IO specific HPX io_service objects ...
+            hpx::threads::executors::io_pool_executor scheduler;
+
+            // ... and schedule the handler to run on one of its OS-threads.
+            scheduler.add(hpx::util::bind(&orangefs_file::open_work, this,
+                        boost::ref(name), flag));
+
+            // Note that the destructor of the scheduler object will wait for
+            // the scheduled task to finish executing.
+        }
+
+        void open_work(std::string const& name, int const flag)
         {
             if (fd_ >= 0)
             {
@@ -62,6 +77,18 @@ namespace hpx { namespace io { namespace server
 
         void close()
         {
+            // Get a reference to one of the IO specific HPX io_service objects ...
+            hpx::threads::executors::io_pool_executor scheduler;
+
+            // ... and schedule the handler to run on one of its OS-threads.
+            scheduler.add(hpx::util::bind(&orangefs_file::close_work, this));
+
+            // Note that the destructor of the scheduler object will wait for
+            // the scheduled task to finish executing.
+        }
+
+        void close_work()
+        {
             if (fd_ >= 0)
             {
                 pvfs_close(fd_);
@@ -72,16 +99,36 @@ namespace hpx { namespace io { namespace server
 
         int remove_file(std::string const& file_name)
         {
-            return pvfs_unlink(file_name.c_str());
+            int result;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::remove_file_work,
+                            this, boost::ref(file_name), boost::ref(result)));
+            }
+            return result;
+        }
+
+        void remove_file_work(std::string const& file_name, int& result)
+        {
+            result = pvfs_unlink(file_name.c_str());
         }
 
         std::vector<char> read(size_t const count)
         {
-            std::vector<char> empty_vector;
+            std::vector<char> result;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::read_work,
+                            this, count, boost::ref(result)));
+            }
+            return result;
+        }
 
+        void read_work(size_t const count, std::vector<char>& result)
+        {
             if (fd_ < 0 || count <= 0)
             {
-                return empty_vector;
+                return;
             }
 
             std::unique_ptr<char> sp(new char[count]);
@@ -89,19 +136,29 @@ namespace hpx { namespace io { namespace server
 
             if (len == 0)
             {
-                return empty_vector;
+                return;
             }
 
-            return std::vector<char>(sp.get(), sp.get() + len);
+            result.assign(sp.get(), sp.get() + len);
         }
 
         std::vector<char> pread(size_t const count, off_t const offset)
         {
-            std::vector<char> empty_vector;
+            std::vector<char> result;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::pread_work,
+                            this, count, offset, boost::ref(result)));
+            }
+            return result;
+        }
 
+        void pread_work(size_t const count, off_t const offset,
+                std::vector<char>& result)
+        {
             if (fd_ < 0 || count <= 0 || offset < 0)
             {
-                return empty_vector;
+                return;
             }
 
             std::unique_ptr<char> sp(new char[count]);
@@ -109,38 +166,73 @@ namespace hpx { namespace io { namespace server
 
             if (len == 0)
             {
-                return empty_vector;
+                return;
             }
 
-            return std::vector<char>(sp.get(), sp.get() + len);
+            result.assign(sp.get(), sp.get() + len);
         }
 
         ssize_t write(std::vector<char> const& buf)
         {
+            ssize_t result = 0;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::write_work,
+                            this, boost::ref(buf), boost::ref(result)));
+            }
+            return result;
+        }
+
+        void write_work(std::vector<char> const& buf, ssize_t& result)
+        {
             if (fd_ < 0 || buf.empty())
             {
-                return 0;
+                return;
             }
-            return pvfs_write(fd_, buf.data(), buf.size());
+            result = pvfs_write(fd_, buf.data(), buf.size());
         }
 
         ssize_t pwrite(std::vector<char> const& buf, off_t const offset)
         {
+            ssize_t result = 0;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::pwrite_work,
+                    this, boost::ref(buf), offset, boost::ref(result)));
+            }
+            return result;
+        }
+
+        void pwrite_work(std::vector<char> const& buf,
+                off_t const offset, ssize_t& result)
+        {
             if (fd_ < 0 || buf.empty() || offset < 0)
             {
-                return 0;
+                return;
             }
-            return pvfs_pwrite(fd_, buf.data(), buf.size(), offset);
+            result = pvfs_pwrite(fd_, buf.data(), buf.size(), offset);
         }
 
         int lseek(off_t const offset, int const whence)
         {
+            int result;
+            {
+                hpx::threads::executors::io_pool_executor scheduler;
+                scheduler.add(hpx::util::bind(&orangefs_file::lseek_work,
+                    this, offset, whence, boost::ref(result)));
+            }
+            return result;
+        }
+
+        void lseek_work(off_t const offset, int const whence, int& result)
+        {
             if (fd_ < 0)
             {
-                return -1;
+                result = -1;
+                return;
             }
 
-            return pvfs_lseek(fd_, offset, whence);
+            result = pvfs_lseek(fd_, offset, whence);
         }
 
         ///////////////////////////////////////////////////////////////////////
